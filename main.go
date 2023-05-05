@@ -32,27 +32,75 @@ func createClient(accessKey string, secretKey string, poolId string) *ecloudsdke
 }
 
 // ListKey 列表创建的秘钥有哪些
-func ListKey(ak string, sk string, pid string) {
+func ListKey(ak string, sk string, pid string) error {
 	//创建客户端
 	client := createClient(ak, sk, pid)
 	request := &model.VmListKeyPairRequest{}
 	response, err := client.VmListKeyPair(request)
-
-	if err != nil {
-		fmt.Printf("查询SSH密钥列表出现错误：%+v", err)
-	} else {
-		content := *response.Body.Content
-		table := tablewriter.NewWriter(os.Stdout)
-		table.SetHeader([]string{"SSH密钥名称", "Region"})
-		for i := range content {
-			table.Append([]string{content[i].Name, content[i].Region})
+	if err == nil {
+		if response.State == "OK" {
+			if response.Body.Content != nil {
+				content := *response.Body.Content
+				table := tablewriter.NewWriter(os.Stdout)
+				table.SetHeader([]string{"SSH密钥名称", "Region"})
+				for i := range content {
+					table.Append([]string{content[i].Name, content[i].Region})
+				}
+				table.Render()
+				return nil
+			} else {
+				err := fmt.Errorf("此凭据下无密钥")
+				return err
+			}
+		} else {
+			err := fmt.Errorf("列出密钥失败," + response.ErrorMessage)
+			return err
 		}
-		table.Render()
+	} else {
+		err := fmt.Errorf("列出密钥失败," + err.Error())
+		return err
 	}
 }
 
 // GetECSInfo 获取绑定的ECS信息
 func GetECSInfo(ak string, sk string, pid string) (*[]config2.ECSInfo, error) {
+	var ECSInfo []config2.ECSInfo
+	//创建客户端
+	client := createClient(ak, sk, pid)
+	//信息查询
+	request := &model.VmListServeRequest{}
+	response, err := client.VmListServe(request)
+	if err != nil || response.State != "OK" {
+		err := fmt.Errorf("获取ECS信息失败,请检查你的AK,SK,PD！")
+		return nil, err
+	} else {
+		if *response.Body.Total == 0 {
+			gologger.Error().Msgf(("此密钥无关联主机！"))
+			os.Exit(0)
+		}
+		Total := *response.Body.Total
+		content := *response.Body.Content
+		gologger.Print().Msgf("此密钥关联云主机数量:%v", Total)
+		for i := range content {
+			var ip = *content[i].PortDetail
+			ecs := config2.ECSInfo{
+				Id:       content[i].Id,
+				UserName: content[i].UserName,
+				Name:     content[i].Name,
+				OpStatus: string(content[i].OpStatus),
+				Region:   content[i].Region,
+				FIP:      ip[0].FipAddress,
+				IntraIP:  ip[0].PrivateIp,
+				KeyName:  content[i].KeyName,
+			}
+			ECSInfo = append(ECSInfo, ecs)
+		}
+		return &ECSInfo, nil
+	}
+}
+
+/*// GetECSInfoCirculate 无PD情况下循环PD号获取取绑定的ECS信息
+func GetECSInfoCirculate(ak string, sk string, ) (*[]config2.ECSInfo, error) {
 	var ECSInfo []config2.ECSInfo
 	//创建客户端
 	client := createClient(ak, sk, pid)
@@ -81,25 +129,32 @@ func GetECSInfo(ak string, sk string, pid string) (*[]config2.ECSInfo, error) {
 		}
 		return &ECSInfo, nil
 	}
-}
+}*/
 
 // CreatKey 创建SSH秘钥
-func CreatKey(ak string, sk string, pid string, keyName string, region string, publicKey string) {
+func CreatKey(ak string, sk string, pid string, keyName string, region string, publicKey string) error {
 	//创建客户端
 	client := createClient(ak, sk, pid)
 	request := &model.VmInputKeyPairRequest{
 		VmInputKeyPairBody: &model.VmInputKeyPairBody{Name: keyName, PublicKey: publicKey, Region: region},
 	}
 	response, err := client.VmInputKeyPair(request)
-	if err == nil && response.State != "ERROR" {
-		fmt.Printf("创建密钥成功！密钥名称：%+v", keyName)
+	if err == nil {
+		if response.State == "OK" {
+			gologger.Print().Msgf("创建密钥成功！密钥名称：", keyName)
+			return nil
+		} else {
+			err := fmt.Errorf("创建SshKey失败：", response.ErrorMessage)
+			return err
+		}
 	} else {
-		fmt.Printf("创建密钥失败！%+v", response.ErrorMessage)
+		err := fmt.Errorf("创建SshKey失败," + err.Error())
+		return err
 	}
 }
 
 // BindKeToECS 将SSH秘钥导入到ECS
-func BindKeToECS(ak string, sk string, pid string, keyName string, id string) {
+func BindKeToECS(ak string, sk string, pid string, keyName string, id string) error {
 	client := createClient(ak, sk, pid)
 	request := &model.VmBindServerKeypairRequest{
 		VmBindServerKeypairBody: &model.VmBindServerKeypairBody{
@@ -109,16 +164,27 @@ func BindKeToECS(ak string, sk string, pid string, keyName string, id string) {
 		},
 	}
 	response, err := client.VmBindServerKeypair(request)
-	if err == nil && response.State != "ERROR" {
-		fmt.Printf("成功将SSH密钥%+v绑定到云主机", keyName)
+	if err == nil {
+		if response.State == "OK" {
+			gologger.Print().Msgf("成功将SSH密钥绑定到云主机：", keyName)
+			return nil
+		} else {
+			err := fmt.Errorf("绑定失败：", response.ErrorMessage)
+			return err
+		}
 	} else {
-		fmt.Println("绑定失败：", response.ErrorMessage)
+		fmt.Println("绑定失败：", err.Error())
+		return err
 	}
 }
 
 func main() {
 	//1、初始化flag
 	args := InitFlag()
+	if args.SK == "" || args.AK == "" || args.PoolID == "" {
+		gologger.Info().Msgf("未键入凭据,请通过-h查询详细命令！")
+		return
+	}
 
 	//判断flag执行相应的命令
 	switch {
@@ -127,22 +193,39 @@ func main() {
 		table := tablewriter.NewWriter(os.Stdout)
 		table.SetHeader([]string{"云主机Id", "订购用户名", "ECS名称", "状态", "Region", "内网IP", "开放IP", "绑定秘钥名称"})
 		info, err := GetECSInfo(args.AK, args.SK, args.PoolID)
+		if err != nil {
+			gologger.Error().Msgf(err.Error())
+			return
+		}
 		for _, ecs := range *info {
 			table.Append([]string{ecs.Id, ecs.UserName, ecs.Name, ecs.OpStatus, ecs.Region, ecs.IntraIP, ecs.FIP, ecs.KeyName})
 		}
 		table.Render()
 		if err != nil {
 			gologger.Error().Msgf(err.Error())
+			return
 		}
 	case args.Mod == "ck":
 		//创建密钥
-		CreatKey(args.AK, args.SK, args.PoolID, args.KeyName, args.Region, args.PublicKey)
+		err := CreatKey(args.AK, args.SK, args.PoolID, args.KeyName, args.Region, args.PublicKey)
+		if err != nil {
+			gologger.Error().Msgf(err.Error())
+			return
+		}
 		//输出秘钥列表信息
 	case args.Mod == "lk":
 		//列举密钥
-		ListKey(args.AK, args.SK, args.PoolID)
+		err := ListKey(args.AK, args.SK, args.PoolID)
+		if err != nil {
+			gologger.Error().Msgf(err.Error())
+			return
+		}
 	case args.Mod == "bd":
-		BindKeToECS(args.AK, args.SK, args.PoolID, args.KeyName, args.ID)
+		err := BindKeToECS(args.AK, args.SK, args.PoolID, args.KeyName, args.ID)
+		if err != nil {
+			gologger.Error().Msgf(err.Error())
+			return
+		}
 	default:
 		fmt.Printf("请通过-mod选择模式！\ninfo  查询绑定的所有ecs基本信息\nlk 列表ssh密钥\nck 创建ssh密钥\nbd 将SSH密钥绑定ECS")
 	}
@@ -191,7 +274,7 @@ func InitFlag() *config2.InputArgs {
 ░██░░░░ ░██   ██ ░██░██   ░██░██  ░██░██  ░██
 ░░██████░░█████  ███░░██████ ░░██████░░██████
  ░░░░░░  ░░░░░  ░░░  ░░░░░░   ░░░░░░  ░░░░░░ 
-	`)
+	by f1ndm1`)
 	gologger.Print().Msgf("%s\n", banner)
 	//初始化flag
 	var args config2.InputArgs
